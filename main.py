@@ -1,3 +1,4 @@
+# ==================== PROJET 1: Bot de Stockage de Résultats ====================
 import os
 import asyncio
 import json
@@ -11,9 +12,12 @@ from telethon.events import ChatAction
 from dotenv import load_dotenv
 from game_results_manager import GameResultsManager
 from yaml_manager import YAMLDataManager
-from excel_importer import ExcelPredictionManager
 from aiohttp import web
 from pathlib import Path
+
+# ==================== PROJET 2: Système de Prédiction ====================
+from predictor import CardPredictor
+from excel_importer import ExcelPredictionManager
 
 # Configuration du logging
 logging.basicConfig(
@@ -35,7 +39,7 @@ try:
     API_HASH = os.getenv('API_HASH') or ''
     BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
     ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
-    PORT = int(os.getenv('PORT') or '5000')
+    PORT = int(os.getenv('PORT') or '10000')
 
     # Validation des variables requises
     if not API_ID or API_ID == 0:
@@ -56,15 +60,18 @@ CONFIG_FILE = 'bot_config.json'
 
 # Variables globales
 detected_stat_channel = None
-prediction_display_channel = -1002999811353  # Canal pour les prédictions
 confirmation_pending = {}
 transfer_enabled = True
-last_generated_excel = None  # Stocke le dernier fichier Excel généré
 
-# Gestionnaires
+# ==================== GESTIONNAIRES PROJET 1 ====================
 yaml_manager = YAMLDataManager()
 results_manager = GameResultsManager()
+
+# ==================== GESTIONNAIRES PROJET 2 ====================
+predictor = CardPredictor()
 excel_manager = ExcelPredictionManager()
+detected_display_channel = None
+prediction_interval = 1
 
 # Client Telegram
 import time
@@ -294,100 +301,7 @@ async def handle_message(event):
                 except Exception as e:
                     logger.error(f"Erreur notification: {e}")
             else:
-                # Ignorer les messages qui ne sont pas finalisés et qui ne sont pas des commandes ou des messages traités par le bot
-                if '✅' not in message_text and '⏰' not in message_text and event.chat_id == detected_stat_channel:
-                    logger.info(f"⚠️ Message ignoré (non finalisé): {info}")
-                    return
-                elif '✅' not in message_text and event.chat_id == detected_stat_channel:
-                    logger.info(f"⚠️ Message ignoré (non finalisé): {info}")
-                    return
-                else:
-                    logger.info(f"⚠️ Message ignoré: {info}")
-
-            # === LOGIQUE EXCEL PREDICTIONS ===
-            try:
-                import re
-                game_number_match = re.search(r'#[NnRr]?(\d+)', message_text)
-
-                if game_number_match:
-                    game_number = int(game_number_match.group(1))
-                    
-                    # 2. Lancer automatiquement les prédictions proches
-                    close_pred = excel_manager.find_close_prediction(game_number, tolerance=4)
-                    if close_pred and prediction_display_channel:
-                        pred_key = close_pred["key"]
-                        pred_data = close_pred["prediction"]
-                        pred_numero = pred_data["numero"]
-                        victoire_type = pred_data["victoire"]
-
-                        v_format = excel_manager.get_prediction_format(victoire_type)
-                        prediction_msg = f"🔵{pred_numero} {v_format}statut :⏳"
-
-                        try:
-                            sent_msg = await client.send_message(prediction_display_channel, prediction_msg)
-                            excel_manager.mark_as_launched(pred_key, sent_msg.id, prediction_display_channel)
-                            logger.info(f"🚀 Prédiction Excel #{pred_numero} lancée (écart +{pred_numero - game_number})")
-                        except Exception as e:
-                            logger.error(f"❌ Erreur envoi prédiction #{pred_numero}: {e}")
-
-                    # 3. Vérifier les prédictions Excel lancées (messages finalisés OU matchs nuls)
-                    if ('✅' in message_text or '🔰' in message_text) and '⏰' not in message_text:
-                        for key, pred in list(excel_manager.predictions.items()):
-                            if not pred["launched"] or pred.get("verified", False):
-                                continue
-
-                            pred_numero = pred["numero"]
-                            expected_winner = pred["victoire"]
-
-                            # Calculer l'offset réel depuis le numéro de jeu
-                            real_offset = game_number - pred_numero
-
-                            # Si le jeu est avant la prédiction, continuer à attendre
-                            if real_offset < 0:
-                                continue
-
-                            # Si l'offset dépasse 2, marquer comme échec
-                            if real_offset > 2:
-                                msg_id = pred.get("message_id")
-                                channel_id = pred.get("channel_id")
-                                if msg_id and channel_id:
-                                    v_format = excel_manager.get_prediction_format(expected_winner)
-                                    new_text = f"🔵{pred_numero} {v_format}statut :⭕✍🏻"
-                                    try:
-                                        await client.edit_message(channel_id, msg_id, new_text)
-                                        pred["verified"] = True
-                                        excel_manager.save_predictions()
-                                        logger.info(f"⭕ Prédiction Excel #{pred_numero}: échec (offset {real_offset} > 2)")
-                                    except Exception as e:
-                                        logger.error(f"❌ Erreur mise à jour échec #{pred_numero}: {e}")
-                                continue
-
-                            # Vérifier avec l'offset réel (0, 1 ou 2)
-                            # Match nul (🔰) → None, True → Continue sans arrêt
-                            status, should_stop = excel_manager.verify_excel_prediction(
-                                game_number, message_text, pred_numero, expected_winner, real_offset
-                            )
-
-                            if status:
-                                # Résultat trouvé (✅0️⃣, ✅1️⃣, ✅2️⃣, ou ❌) → ARRÊT
-                                msg_id = pred.get("message_id")
-                                channel_id = pred.get("channel_id")
-
-                                if msg_id and channel_id:
-                                    v_format = excel_manager.get_prediction_format(expected_winner)
-                                    new_text = f"🔵{pred_numero} {v_format}statut :{status}"
-
-                                    try:
-                                        await client.edit_message(channel_id, msg_id, new_text)
-                                        pred["verified"] = True
-                                        excel_manager.save_predictions()
-                                        logger.info(f"✅ Prédiction Excel #{pred_numero}: {status} (offset {real_offset})")
-                                    except Exception as e:
-                                        logger.error(f"❌ Erreur mise à jour prédiction #{pred_numero}: {e}")
-                            # Si status est None et should_stop est True → match nul, on continue avec le prochain jeu
-
-            except Exception as e:
-                logger.error(f"❌ Erreur logique Excel: {e}")
+                logger.info(f"⚠️ Message ignoré: {info}")
 
     except Exception as e:
         logger.error(f"❌ Erreur traitement message: {e}")
@@ -419,11 +333,6 @@ async def handle_edited_message(event):
                         transferred_messages[event.message.id] = sent_msg.id
                     except Exception as e:
                         logger.error(f"❌ Erreur transfert message édité: {e}")
-
-            # Ne traiter que les messages finalisés pour la logique de résultats
-            if '✅' not in message_text and '⏰' not in message_text:
-                logger.info("⚠️ Message édité ignoré (non finalisé)")
-                return
 
             success, info = results_manager.process_message(message_text)
 
@@ -517,8 +426,6 @@ Utilisez /fichier pour exporter les résultats."""
 @client.on(events.NewMessage(pattern='/fichier'))
 async def cmd_fichier(event):
     """Exporte les résultats en fichier Excel"""
-    global last_generated_excel
-
     if event.is_group or event.is_channel:
         return
 
@@ -531,17 +438,12 @@ async def cmd_fichier(event):
         file_path = results_manager.export_to_txt()
 
         if file_path and os.path.exists(file_path):
-            last_generated_excel = file_path
-
             await client.send_file(
                 event.chat_id,
                 file_path,
-                caption="📊 **Export des résultats**\n\nFichier Excel généré avec succès!\n\n🎯 Ce fichier sera automatiquement utilisé pour les prédictions."
+                caption="📊 **Export des résultats**\n\nFichier Excel généré avec succès!"
             )
             logger.info("✅ Fichier Excel exporté et envoyé")
-
-            # Auto-importer pour les prédictions
-            await auto_import_excel(file_path)
         else:
             await event.respond("❌ Erreur lors de la génération du fichier Excel")
 
@@ -566,16 +468,14 @@ async def cmd_deploy(event):
         benin_tz = timezone(timedelta(hours=1))
         now_benin = datetime.now(benin_tz)
         timestamp = now_benin.strftime('%Y-%m-%d_%H-%M-%S')
-
+        
         deploy_dir = Path(f"deploy_render_{timestamp}")
         deploy_dir.mkdir(exist_ok=True)
 
         files_to_copy = [
             'main.py',
             'game_results_manager.py',
-            'yaml_manager.py',
-            'excel_importer.py',
-            'predictor.py'
+            'yaml_manager.py'
         ]
 
         for file in files_to_copy:
@@ -615,7 +515,7 @@ openpyxl==3.1.2
 
         with open(deploy_dir / 'requirements.txt', 'w', encoding='utf-8') as f:
             f.write(requirements)
-
+        
         env_example = """# Variables d'environnement pour le bot Telegram
 # Ne jamais committer ces valeurs réelles !
 
@@ -661,34 +561,19 @@ Dans la section **Environment** de Render.com, ajoutez:
 
 ## ✅ Fonctionnalités principales
 
-### 📊 Stockage des résultats
 - ✅ **Détection automatique**: Reconnaît les parties avec 3 cartes différentes
 - ✅ **Export quotidien**: Génère un fichier Excel à 00h59 (UTC+1)
 - ✅ **Réinitialisation auto**: Reset automatique à 01h00
 - ✅ **Statistiques en temps réel**: Taux de victoire Joueur/Banquier
 
-### 🎯 Prédictions Excel (intégrées)
-- ✅ **Import Excel**: Importation de prédictions depuis fichiers .xlsx
-- ✅ **Lancement automatique**: Détection proximité 0-4 parties d'écart
-- ✅ **Vérification offsets**: Validation avec offsets 0, 1, 2
-- ✅ **Filtrage consécutifs**: Ignore automatiquement les numéros consécutifs
-- ✅ **Statuts visuels**: ⏳ En attente, ✅0️⃣/✅1️⃣/✅2️⃣ Réussi, ⭕✍🏻 Échec
-
 ## 📊 Commandes disponibles
 
-### Commandes générales
 - `/start` - Démarrer le bot et voir les informations
 - `/status` - Voir les statistiques actuelles
 - `/fichier` - Exporter les résultats en Excel
 - `/reset` - Réinitialiser la base de données manuellement
 - `/deploy` - Créer un nouveau package de déploiement
 - `/help` - Afficher l'aide complète
-
-### Commandes prédictions Excel (Admin)
-- **Envoyer fichier .xlsx** - Importer des prédictions Excel
-- `/excel_status` - Statut des prédictions Excel
-- `/excel_clear` - Effacer toutes les prédictions
-- `/sta` - Statistiques rapides Excel
 
 ## 🎯 Critères d'enregistrement
 
@@ -718,7 +603,7 @@ Dans la section **Environment** de Render.com, ajoutez:
         with open(deploy_dir / 'README_DEPLOIEMENT.md', 'w', encoding='utf-8') as f:
             f.write(readme)
 
-        deploy_zip = "duo2025.zip"
+        deploy_zip = "Kouamé.zip"
         with zipfile.ZipFile(deploy_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
             for root, dirs, files in os.walk(deploy_dir):
                 for file in files:
@@ -726,19 +611,13 @@ Dans la section **Environment** de Render.com, ajoutez:
                     arcname = os.path.relpath(file_path, deploy_dir)
                     zipf.write(file_path, arcname)
 
-        short_caption = f"""📦 **Package Render.com - duo2025**
+        short_caption = f"""📦 **Package Render.com - Kouamé**
 
 📅 {now_benin.strftime('%d/%m/%Y %H:%M:%S')} (Bénin)
-📁 duo2025.zip
-
-**Fonctionnalités incluses:**
-✅ Stockage résultats de jeux
-✅ Prédictions Excel intégrées
-✅ Export automatique à 00h59
-✅ Reset automatique à 01h00
+📁 Kouamé.zip
 ✅ Port 10000 configuré
-
-**Fichiers:** main.py, game_results_manager.py, yaml_manager.py, excel_importer.py, predictor.py"""
+✅ Export à 00h59
+✅ Reset à 01h00"""
 
         await client.send_file(
             ADMIN_ID,
@@ -813,6 +692,381 @@ async def cmd_reset(event):
         await event.respond(f"❌ Erreur: {e}")
 
 
+@client.on(events.NewMessage(pattern='/deploy_duo2'))
+async def cmd_deploy_duo2(event):
+    """Crée un package 'duo Final.zip' avec Projet 1 + Projet 2 optimisé pour Render.com (Port 10000)"""
+    if event.is_group or event.is_channel:
+        return
+
+    if event.sender_id != ADMIN_ID:
+        await event.respond("❌ Commande réservée à l'administrateur")
+        return
+
+    try:
+        await event.respond("📦 Création du package 'duo Final' pour Render.com (Port 10000)...")
+
+        benin_tz = timezone(timedelta(hours=1))
+        now_benin = datetime.now(benin_tz)
+        timestamp = now_benin.strftime('%Y-%m-%d_%H-%M-%S')
+        
+        package_name = "duo Final.zip"
+        
+        with zipfile.ZipFile(package_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # ========== FICHIERS PROJET 1 + PROJET 2 ==========
+            all_files = [
+                'main.py',
+                'game_results_manager.py',
+                'yaml_manager.py',
+                'predictor.py',
+                'excel_importer.py'
+            ]
+            
+            # Copier tous les fichiers Python
+            for file in all_files:
+                if os.path.exists(file):
+                    zipf.write(file, file)
+                    logger.info(f"  ✅ Ajouté: {file}")
+                    
+            # ========== CONFIGURATION BOT ==========
+            config = {
+                "stat_channel": detected_stat_channel,
+                "display_channel": detected_display_channel,
+                "prediction_interval": prediction_interval
+            }
+            zipf.writestr('bot_config.json', json.dumps(config, indent=2))
+            logger.info("  ✅ Ajouté: bot_config.json")
+            
+            # ========== REQUIREMENTS.TXT ==========
+            requirements = """telethon==1.35.0
+aiohttp==3.9.5
+python-dotenv==1.0.1
+pyyaml==6.0.1
+openpyxl==3.1.2"""
+            zipf.writestr('requirements.txt', requirements)
+            logger.info("  ✅ Ajouté: requirements.txt")
+            
+            # ========== .ENV.EXAMPLE ==========
+            env_example = """# Variables d'environnement Render.com
+# NE JAMAIS committer les valeurs réelles!
+
+API_ID=votre_api_id
+API_HASH=votre_api_hash
+BOT_TOKEN=votre_bot_token
+ADMIN_ID=votre_admin_id
+PORT=10000"""
+            zipf.writestr('.env.example', env_example)
+            logger.info("  ✅ Ajouté: .env.example")
+            
+            # ========== RENDER.YAML ==========
+            render_yaml = """services:
+  - type: web
+    name: bot-telegram-duo-final
+    env: python
+    region: frankfurt
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+"""
+            zipf.writestr('render.yaml', render_yaml)
+            logger.info("  ✅ Ajouté: render.yaml")
+            
+            # ========== PROCFILE ==========
+            procfile = "web: python main.py"
+            zipf.writestr('Procfile', procfile)
+            logger.info("  ✅ Ajouté: Procfile")
+            
+            # ========== RUNTIME.TXT ==========
+            runtime = "python-3.11.0"
+            zipf.writestr('runtime.txt', runtime)
+            logger.info("  ✅ Ajouté: runtime.txt")
+            
+            # ========== STRUCTURE DATA/ ==========
+            zipf.writestr('data/.gitkeep', '# Dossier pour fichiers YAML\n# Créé automatiquement par le bot\n')
+            logger.info("  ✅ Ajouté: data/.gitkeep")
+            
+            # ========== README.MD COMPLET ==========
+            readme = f"""# 📦 Package "duo Final" - Bot Telegram Render.com
+
+📅 **Créé le:** {now_benin.strftime('%d/%m/%Y à %H:%M:%S')} (Heure Bénin UTC+1)
+📦 **Version:** {timestamp}
+🚀 **Optimisé pour:** Render.com (Port 10000)
+
+---
+
+## 🎯 Contenu du Package
+
+### ✅ **Projet 1: Stockage de Résultats**
+- 📊 Surveillance de canal source automatique
+- 💾 Stockage parties avec 3 cartes différentes
+- 📤 Export Excel quotidien à 00h59 (UTC+1)
+- 🔄 Reset automatique à 01h00
+- 🎯 Détection automatique du gagnant (Joueur/Banquier)
+- ❌ Filtrage des numéros consécutifs
+- 📥 **Import automatique dans Projet 2 après export**
+
+### ✅ **Projet 2: Système de Prédictions Excel**
+- 📥 Import de prédictions Excel (.xlsx)
+- 🚀 Lancement automatique basé sur proximité (tolérance 0-4)
+- 🔢 **Filtrage automatique des numéros consécutifs**
+- ✅ Vérification avec offsets (0, 1, 2)
+- 🎨 Format V1 (Joueur) / V2 (Banquier)
+- 📊 Statistiques en temps réel
+
+---
+
+## 📋 Fichiers Inclus dans le Package
+
+### **Code Source (Projet 1 + Projet 2):**
+- ✅ `main.py` - Fichier principal (projets fusionnés)
+- ✅ `game_results_manager.py` - Gestionnaire résultats Projet 1
+- ✅ `yaml_manager.py` - Gestionnaire données YAML
+- ✅ `predictor.py` - Système de prédictions Projet 2
+- ✅ `excel_importer.py` - Import et gestion Excel Projet 2
+
+### **Configuration Render.com:**
+- ✅ `render.yaml` - Déploiement automatique
+- ✅ `Procfile` - Commande de démarrage
+- ✅ `runtime.txt` - Version Python 3.11
+- ✅ `requirements.txt` - Dépendances Python
+- ✅ `bot_config.json` - Configuration canaux
+- ✅ `.env.example` - Template variables d'environnement
+
+### **Structure:**
+- ✅ `data/` - Dossier pour fichiers YAML (auto-créé)
+- ✅ `README.md` - Ce fichier de documentation
+
+---
+
+## 🚀 Déploiement sur Render.com
+
+### **Étape 1: Créer un Repository GitHub**
+1. Allez sur [github.com](https://github.com)
+2. Créez un nouveau repository (public ou privé)
+3. Uploadez **TOUS** les fichiers du package "duo Final.zip"
+
+### **Étape 2: Connecter à Render.com**
+1. Allez sur [render.com](https://render.com)
+2. Cliquez sur **"New +"** → **"Web Service"**
+3. Connectez votre repository GitHub
+4. Render détectera automatiquement `render.yaml`
+
+### **Étape 3: Configurer les Variables d'Environnement**
+Dans la section **Environment** de Render.com, ajoutez:
+
+| Variable | Valeur | Où l'obtenir |
+|----------|--------|--------------|
+| **PORT** | 10000 | Déjà configuré automatiquement |
+| **API_ID** | Votre ID | https://my.telegram.org |
+| **API_HASH** | Votre Hash | https://my.telegram.org |
+| **BOT_TOKEN** | Token du bot | @BotFather sur Telegram |
+| **ADMIN_ID** | Votre ID Telegram | @userinfobot sur Telegram |
+
+### **Étape 4: Déployer**
+1. Cliquez sur **"Create Web Service"**
+2. Attendez le déploiement (2-3 minutes)
+3. ✅ Le bot sera en ligne 24/7 sur le port 10000!
+
+---
+
+## 📊 Commandes Disponibles
+
+### **Projet 1 (Stockage de Résultats):**
+- `/start` - Démarrer le bot et voir les infos
+- `/status` - Voir les statistiques
+- `/fichier` - Exporter résultats en Excel
+- `/reset` - Reset manuel de la base
+- `/set_channel <ID>` - Configurer canal source
+- `/stop_transfer` - Désactiver transfert messages
+- `/start_transfer` - Réactiver transfert messages
+
+### **Projet 2 (Prédictions Excel):**
+- `/set_display <ID>` - Configurer canal affichage
+- `/stats_excel` - Statistiques prédictions Excel
+- `/clear_excel` - Effacer toutes les prédictions
+- **Envoyer fichier Excel (.xlsx)** - Import automatique
+
+### **Autres Commandes:**
+- `/deploy` - Créer package Render.com (Projet 1)
+- `/deploy_duo2` - Créer package "duo Final" (Projet 1 + 2)
+- `/help` - Aide complète
+
+---
+
+## ⚙️ Configuration Technique
+
+| Paramètre | Valeur |
+|-----------|--------|
+| **Plateforme** | Render.com |
+| **Port** | 10000 (auto-configuré) |
+| **Python** | 3.11.0 |
+| **Timezone** | Africa/Porto-Novo (UTC+1) |
+| **Export auto** | 00h59 chaque jour |
+| **Reset auto** | 01h00 chaque jour |
+| **Import auto Projet 2** | Après export Projet 1 |
+
+---
+
+## 📥 Format Excel Requis (Projet 2)
+
+Votre fichier Excel doit avoir cette structure:
+
+| Date & Heure | Numéro | Victoire (Joueur/Banquier) |
+|--------------|--------|----------------------------|
+| 03/01/2025 - 14:20 | 881 | Banquier |
+| 03/01/2025 - 14:26 | 886 | Joueur |
+| 03/01/2025 - 14:40 | 891 | Joueur |
+
+**⚠️ Important:** Les numéros consécutifs (ex: 56→57) sont automatiquement filtrés à l'import.
+
+---
+
+## 🎯 Critères d'Enregistrement (Projet 1)
+
+### ✅ **Parties enregistrées:**
+- Premier groupe: **exactement 3 cartes de couleurs différentes**
+- Deuxième groupe: **PAS 3 cartes**
+- Gagnant identifiable: **Joueur** ou **Banquier**
+- Message finalisé avec symbole **✅**
+
+### ❌ **Parties ignorées:**
+- Match nul
+- Les deux groupes ont 3 cartes
+- Numéros consécutifs (N puis N+1)
+- Messages en cours (symbole ⏰)
+- Messages avec symbole 🔰
+
+---
+
+## 🔄 Workflow Quotidien Automatique
+
+**À 00h59 (Heure Bénin UTC+1):**
+1. 📊 Export Excel Projet 1
+2. 📤 Envoi fichier à l'admin
+3. 📥 **Import automatique dans Projet 2** (remplacement)
+4. 💬 Message de confirmation import
+
+**À 01h00:**
+5. 🔄 Reset base de données Projet 1
+6. ✅ Système prêt pour nouvelle journée
+
+---
+
+## 🛠️ Dépannage
+
+### **Problème: Bot ne démarre pas**
+- ✅ Vérifiez que toutes les variables d'environnement sont définies
+- ✅ Vérifiez les logs dans Render.com
+- ✅ Assurez-vous que le port 10000 est bien configuré
+
+### **Problème: Prédictions Excel non lancées**
+- ✅ Vérifiez que le canal source est configuré avec `/set_channel`
+- ✅ Vérifiez que le canal d'affichage est configuré avec `/set_display`
+- ✅ Vérifiez le format du fichier Excel
+
+### **Problème: Export quotidien ne fonctionne pas**
+- ✅ Vérifiez que la timezone est bien Africa/Porto-Novo (UTC+1)
+- ✅ Vérifiez les logs à 00h59 et 01h00
+- ✅ Assurez-vous que des parties ont été enregistrées
+
+---
+
+## 📞 Support
+
+**Développé par:** Sossou Kouamé Appolinaire  
+**Package créé le:** {timestamp}  
+**Version:** duo Final  
+**Optimisé pour:** Render.com - Port 10000
+
+---
+
+## ✅ Checklist de Déploiement
+
+Avant de déployer, vérifiez:
+
+- [ ] Repository GitHub créé
+- [ ] Tous les fichiers du package uploadés
+- [ ] Variables d'environnement configurées sur Render.com
+- [ ] Port 10000 confirmé dans render.yaml
+- [ ] Service web créé sur Render.com
+- [ ] Déploiement réussi (vérifier les logs)
+- [ ] Bot répond à `/start` sur Telegram
+- [ ] Canal source configuré avec `/set_channel`
+- [ ] Canal affichage configuré avec `/set_display`
+
+**🎉 Le bot est prêt à fonctionner 24/7 sur Render.com!**"""
+            
+            zipf.writestr('README.md', readme)
+            logger.info("  ✅ Ajouté: README.md")
+
+        file_size = os.path.getsize(package_name) / 1024
+        
+        caption = f"""✅ **Package "duo Final" créé avec succès!**
+
+📅 {now_benin.strftime('%d/%m/%Y %H:%M:%S')} (Bénin UTC+1)
+📁 duo Final.zip ({file_size:.1f} KB)
+🚀 **Optimisé pour Render.com - Port 10000**
+
+**📦 Contenu Complet:**
+✅ Projet 1: Stockage de résultats
+✅ Projet 2: Système de prédictions Excel
+✅ render.yaml (déploiement automatique)
+✅ Procfile + runtime.txt
+✅ Configuration complète
+✅ README détaillé
+
+**📂 Fichiers inclus:**
+• main.py (projets fusionnés)
+• game_results_manager.py
+• yaml_manager.py
+• predictor.py
+• excel_importer.py
+• render.yaml
+• Procfile
+• runtime.txt
+• requirements.txt
+• bot_config.json
+• .env.example
+• README.md
+• data/.gitkeep
+
+**🚀 Déploiement Render.com:**
+1. Upload sur GitHub
+2. Connecter à Render.com
+3. Configurer variables d'environnement:
+   • API_ID, API_HASH, BOT_TOKEN, ADMIN_ID
+4. Déployer automatiquement!
+
+**🔄 Workflow Quotidien (00h59 UTC+1):**
+• Export Excel Projet 1
+• Import automatique Projet 2
+• Reset base Projet 1
+
+Le bot tournera 24/7 sur le port 10000! 🎉"""
+
+        await client.send_file(
+            event.chat_id,
+            package_name,
+            caption=caption
+        )
+        
+        logger.info(f"✅ Package 'duo Final.zip' créé pour Render.com: {file_size:.1f} KB")
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur création duo Final: {e}")
+        await event.respond(f"❌ Erreur: {e}")
+
+
 @client.on(events.NewMessage(pattern='/help'))
 async def cmd_help(event):
     """Affiche l'aide"""
@@ -834,7 +1088,7 @@ Le bot surveille un canal et stocke automatiquement les parties qui remplissent 
 • Les deux groupes ont 3 cartes
 • Pas de numéro de jeu identifiable
 
-**Commandes:**
+**Commandes Projet 1 (Stockage):**
 • `/start` - Message de bienvenue
 • `/status` - Voir les statistiques
 • `/fichier` - Exporter en fichier Excel manuellement
@@ -842,6 +1096,15 @@ Le bot surveille un canal et stocke automatiquement les parties qui remplissent 
 • `/reset` - Remettre à zéro la base de données manuellement
 • `/stop_transfer` - Désactiver le transfert des messages du canal
 • `/start_transfer` - Réactiver le transfert des messages du canal
+• `/set_channel <ID>` - Configurer le canal source
+
+**Commandes Projet 2 (Prédictions):**
+• `/set_display <ID>` - Configurer le canal d'affichage
+• `/stats_excel` - Statistiques des prédictions Excel
+• `/clear_excel` - Effacer toutes les prédictions
+• `/deploy_duo2` - Créer package DUO2 (Projet 1 + 2)
+• Envoyer fichier Excel - Import automatique des prédictions
+
 • `/help` - Afficher cette aide
 
 **Export automatique:**
@@ -862,171 +1125,6 @@ Les messages doivent contenir:
 Pour toute question, contactez l'administrateur."""
 
     await event.respond(help_msg)
-
-
-# === HANDLERS EXCEL PREDICTIONS ===
-
-async def auto_import_excel(file_path: str):
-    """Auto-importe un fichier Excel pour les prédictions"""
-    global last_generated_excel
-
-    try:
-        logger.info(f"📥 Auto-import du fichier Excel: {file_path}")
-
-        result = excel_manager.import_excel(file_path)
-
-        if result["success"]:
-            last_generated_excel = file_path
-            msg = f"""✅ **Auto-Import Excel réussi !**
-
-🔄 **Anciennes prédictions REMPLACÉES**
-
-📊 **Statistiques d'import:**
-• Prédictions importées: {result['imported']}
-• Déjà lancées (ignorées): {result['skipped']}
-• Consécutives (ignorées): {result['consecutive_skipped']}
-• **Total actuel**: {result['total']} prédictions
-
-🎯 Les prédictions seront envoyées automatiquement au canal de prédiction."""
-
-            await client.send_message(ADMIN_ID, msg)
-            logger.info(f"✅ Auto-import Excel: {result['imported']} prédictions, {result['consecutive_skipped']} consécutives ignorées")
-        else:
-            await client.send_message(ADMIN_ID, f"❌ Erreur auto-import: {result['error']}")
-            logger.error(f"❌ Erreur auto-import Excel: {result['error']}")
-
-    except Exception as e:
-        logger.error(f"❌ Erreur auto_import_excel: {e}")
-
-
-@client.on(events.NewMessage())
-async def handle_excel_file(event):
-    """Handle Excel file upload for predictions"""
-    global last_generated_excel
-
-    if event.is_group or event.is_channel:
-        return
-
-    if not event.document:
-        return
-
-    try:
-        file_ext = event.document.attributes[0].file_name if event.document.attributes else ""
-        if not file_ext.endswith('.xlsx'):
-            return
-
-        await event.respond("📥 Téléchargement du fichier Excel en cours...")
-
-        file_path = await event.download_media()
-        last_generated_excel = file_path
-
-        await event.respond("📊 Import des prédictions en cours...")
-        result = excel_manager.import_excel(file_path)
-
-        if result["success"]:
-            msg = f"""✅ **Import Excel réussi !**
-
-🔄 **Anciennes prédictions REMPLACÉES**
-
-📊 **Statistiques d'import:**
-• Prédictions importées: {result['imported']}
-• Déjà lancées (ignorées): {result['skipped']}
-• Consécutives (ignorées): {result['consecutive_skipped']}
-• **Total actuel**: {result['total']} prédictions
-
-🎯 Les prédictions seront envoyées au canal: {prediction_display_channel}"""
-            await event.respond(msg)
-            logger.info(f"✅ Import Excel: {result['imported']} prédictions, {result['consecutive_skipped']} consécutives ignorées")
-        else:
-            await event.respond(f"❌ Erreur lors de l'import: {result['error']}")
-            logger.error(f"❌ Erreur import Excel: {result['error']}")
-
-        # Ne pas supprimer le fichier pour pouvoir le réutiliser
-        # if os.path.exists(file_path):
-        #     os.remove(file_path)
-
-    except Exception as e:
-        logger.error(f"❌ Erreur traitement fichier Excel: {e}")
-        await event.respond(f"❌ Erreur: {e}")
-
-
-@client.on(events.NewMessage(pattern='/excel_status'))
-async def cmd_excel_status(event):
-    """Affiche le statut des prédictions Excel"""
-    if event.is_group or event.is_channel:
-        return
-
-    if event.sender_id != ADMIN_ID:
-        await event.respond("❌ Commande réservée à l'administrateur")
-        return
-
-    try:
-        stats = excel_manager.get_stats()
-        pending = excel_manager.get_pending_predictions()
-
-        msg = f"""📊 **Statut Prédictions Excel**
-
-**Statistiques:**
-• Total: {stats['total']}
-• Lancées: {stats['launched']}
-• En attente: {stats['pending']}
-
-**Prochaines prédictions:**"""
-
-        if pending:
-            for i, pred in enumerate(pending[:5], 1):
-                msg += f"\n{i}. #{pred['numero']} - {pred['victoire']}"
-            if len(pending) > 5:
-                msg += f"\n... et {len(pending) - 5} autres"
-        else:
-            msg += "\n_Aucune prédiction en attente_"
-
-        msg += "\n\n💡 Envoyez un fichier .xlsx pour importer de nouvelles prédictions"
-
-        await event.respond(msg)
-
-    except Exception as e:
-        logger.error(f"❌ Erreur excel_status: {e}")
-        await event.respond(f"❌ Erreur: {e}")
-
-
-@client.on(events.NewMessage(pattern='/excel_clear'))
-async def cmd_excel_clear(event):
-    """Efface toutes les prédictions Excel"""
-    if event.is_group or event.is_channel:
-        return
-
-    if event.sender_id != ADMIN_ID:
-        await event.respond("❌ Commande réservée à l'administrateur")
-        return
-
-    try:
-        excel_manager.clear_predictions()
-        await event.respond("🗑️ **Prédictions Excel effacées**\n\nToutes les prédictions Excel ont été supprimées.")
-        logger.info("🗑️ Prédictions Excel effacées")
-
-    except Exception as e:
-        logger.error(f"❌ Erreur excel_clear: {e}")
-        await event.respond(f"❌ Erreur: {e}")
-
-
-@client.on(events.NewMessage(pattern='/sta'))
-async def cmd_sta(event):
-    """Affiche les statistiques Excel simplifiées"""
-    if event.is_group or event.is_channel:
-        return
-
-    if event.sender_id != ADMIN_ID:
-        await event.respond("❌ Commande réservée à l'administrateur")
-        return
-
-    try:
-        stats = excel_manager.get_stats()
-        await event.respond(f"📊 Excel: {stats['total']} total | {stats['launched']} lancées | {stats['pending']} en attente")
-
-    except Exception as e:
-        logger.error(f"❌ Erreur sta: {e}")
-        await event.respond(f"❌ Erreur: {e}")
 
 
 async def index(request):
@@ -1088,8 +1186,6 @@ auto_export_task = None
 
 async def daily_reset():
     """Remise à zéro quotidienne à 00h59 du matin (heure du Bénin UTC+1)"""
-    global last_generated_excel
-
     while True:
         try:
             benin_tz = timezone(timedelta(hours=1))
@@ -1114,9 +1210,6 @@ async def daily_reset():
                 excel_file = results_manager.export_to_txt(file_path=file_path)
 
                 if excel_file and os.path.exists(excel_file):
-                    # Stocker comme dernier Excel généré pour auto-import
-                    last_generated_excel = excel_file
-
                     caption = f"""📊 **Rapport Journalier du {date_str}**
 
 📈 Résultats de la journée (01h00 à 00h59):
@@ -1132,15 +1225,40 @@ async def daily_reset():
                         caption=caption
                     )
                     logger.info(f"✅ Rapport journalier envoyé avec {stats['total']} parties")
-
-                    # Auto-importer le fichier Excel pour les prédictions
-                    await auto_import_excel(excel_file)
             else:
                 await client.send_message(
                     ADMIN_ID,
                     "📊 **Rapport Journalier**\n\nAucune partie enregistrée aujourd'hui (01h00 à 00h59)."
                 )
                 logger.info("ℹ️ Aucune donnée à exporter pour aujourd'hui")
+
+            # ✅ NOUVEAU : Importer automatiquement dans le Projet 2
+            if excel_file and os.path.exists(excel_file):
+                logger.info("📥 Import automatique du fichier Excel dans le Projet 2...")
+                import_result = excel_manager.import_excel(excel_file, replace_mode=True)
+                
+                if import_result['success']:
+                    consecutive_info = f", {import_result.get('consecutive_skipped', 0)} consécutifs ignorés" if import_result.get('consecutive_skipped', 0) > 0 else ""
+                    logger.info(f"✅ Import automatique réussi: {import_result['imported']} prédictions importées{consecutive_info}")
+                    
+                    import_msg = f"""
+📥 **Import Automatique dans Projet 2**
+
+✅ Fichier Excel importé avec succès!
+• Prédictions importées: {import_result['imported']}
+• Anciennes remplacées: {import_result.get('old_count', 0)}
+• Consécutifs ignorés: {import_result.get('consecutive_skipped', 0)}
+• Total en base: {import_result['total']}
+
+Le système est prêt pour la nouvelle journée! 🎉"""
+                    
+                    await client.send_message(ADMIN_ID, import_msg)
+                else:
+                    logger.error(f"❌ Erreur import automatique: {import_result.get('error', 'Inconnue')}")
+                    await client.send_message(
+                        ADMIN_ID,
+                        f"⚠️ **Erreur import automatique Projet 2**\n\n{import_result.get('error', 'Erreur inconnue')}"
+                    )
 
             results_manager._save_yaml([])
             logger.info("✅ Base de données remise à zéro")
@@ -1156,6 +1274,115 @@ async def daily_reset():
         except Exception as e:
             logger.error(f"❌ Erreur remise à zéro: {e}")
             await asyncio.sleep(3600)
+
+
+# ==================== COMMANDES PROJET 2 ====================
+
+@client.on(events.NewMessage(pattern='/set_display'))
+async def set_display_channel(event):
+    """Configure le canal d'affichage des prédictions (Projet 2)"""
+    global detected_display_channel
+    
+    try:
+        if event.is_group or event.is_channel:
+            return
+            
+        if event.sender_id != ADMIN_ID:
+            await event.respond("❌ Seul l'administrateur peut configurer les canaux")
+            return
+            
+        parts = event.message.message.split()
+        if len(parts) < 2:
+            await event.respond("❌ Usage: /set_display <channel_id>")
+            return
+            
+        channel_id = int(parts[1])
+        detected_display_channel = channel_id
+        save_config()
+        
+        await event.respond(f"✅ Canal d'affichage configuré: {channel_id}")
+        logger.info(f"✅ Canal d'affichage configuré: {channel_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur set_display_channel: {e}")
+        await event.respond(f"❌ Erreur: {e}")
+
+
+@client.on(events.NewMessage())
+async def handle_excel_file(event):
+    """Gestion de l'import de fichier Excel (Projet 2)"""
+    try:
+        if event.media and hasattr(event.media, 'document'):
+            doc = event.media.document
+            if doc.mime_type in ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel']:
+                file_path = await event.download_media()
+                
+                result = excel_manager.import_excel(file_path, replace_mode=True)
+                
+                if result['success']:
+                    stats_msg = f"""✅ **Import Excel réussi (REMPLACEMENT)**
+
+📊 **Résultat**:
+• Importées: {result['imported']}
+• Ignorées (déjà lancées): {result['skipped']}
+• Ignorées (consécutives): {result['consecutive_skipped']}
+• Total dans la base: {result['total']}
+
+Mode: {result['mode']}"""
+                    
+                    if result.get('old_count'):
+                        stats_msg += f"\n• Anciennes prédictions: {result['old_count']}"
+                        
+                    await event.respond(stats_msg)
+                else:
+                    await event.respond(f"❌ Erreur import: {result['error']}")
+                    
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    
+    except Exception as e:
+        logger.error(f"❌ Erreur handle_excel_file: {e}")
+
+
+@client.on(events.NewMessage(pattern='/stats_excel'))
+async def stats_excel_command(event):
+    """Affiche les statistiques des prédictions Excel (Projet 2)"""
+    try:
+        stats = excel_manager.get_stats()
+        pending = excel_manager.get_pending_predictions()[:5]
+        
+        msg = f"""📊 **Statistiques Prédictions Excel**
+
+• Total: {stats['total']}
+• Lancées: {stats['launched']}
+• En attente: {stats['pending']}
+
+**Prochaines prédictions:**"""
+        
+        for pred in pending:
+            msg += f"\n• #{pred['numero']}: {pred['victoire']}"
+            
+        await event.respond(msg)
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur stats_excel: {e}")
+        await event.respond(f"❌ Erreur: {e}")
+
+
+@client.on(events.NewMessage(pattern='/clear_excel'))
+async def clear_excel_command(event):
+    """Efface toutes les prédictions Excel (Projet 2)"""
+    if event.sender_id != ADMIN_ID:
+        await event.respond("❌ Seul l'administrateur peut effacer les prédictions")
+        return
+        
+    try:
+        excel_manager.clear_predictions()
+        await event.respond("✅ Toutes les prédictions Excel ont été effacées")
+        
+    except Exception as e:
+        logger.error(f"❌ Erreur clear_excel: {e}")
+        await event.respond(f"❌ Erreur: {e}")
 
 
 async def main():

@@ -1,3 +1,4 @@
+
 import os
 import yaml
 import re
@@ -12,7 +13,29 @@ class ExcelPredictionManager:
         self.last_launched_numero = None  # Dernier numéro lancé pour éviter les consécutifs
         self.load_predictions()
 
-    def import_excel(self, file_path: str) -> Dict[str, Any]:
+    def backup_predictions(self) -> bool:
+        """Create a backup of current predictions before replacing"""
+        try:
+            if os.path.exists(self.predictions_file):
+                backup_name = f"excel_predictions_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.yaml"
+                import shutil
+                shutil.copy2(self.predictions_file, backup_name)
+                print(f"✅ Backup créé: {backup_name}")
+                return True
+            return False
+        except Exception as e:
+            print(f"❌ Erreur création backup: {e}")
+            return False
+
+    def import_excel(self, file_path: str, replace_mode: bool = True) -> Dict[str, Any]:
+        """
+        Importer un fichier Excel avec option de remplacement automatique
+
+        Args:
+            file_path: Chemin vers le fichier Excel
+            replace_mode: Si True, remplace toutes les prédictions (avec backup automatique)
+                         Si False, fusionne avec les prédictions existantes
+        """
         try:
             workbook = load_workbook(file_path, data_only=True)
             sheet = workbook.active
@@ -41,8 +64,8 @@ class ExcelPredictionManager:
 
                 prediction_key = f"{numero_int}"
 
-                # Vérifier si déjà lancé
-                if prediction_key in self.predictions and self.predictions[prediction_key].get("launched"):
+                # Vérifier si déjà lancé (seulement en mode fusion)
+                if not replace_mode and prediction_key in self.predictions and self.predictions[prediction_key].get("launched"):
                     skipped_count += 1
                     continue
 
@@ -61,16 +84,26 @@ class ExcelPredictionManager:
                     "victoire": victoire_type,
                     "launched": False,
                     "message_id": None,
-                    "chat_id": None,
+                    "channel_id": None,
                     "imported_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 }
                 imported_count += 1
                 last_numero = numero_int  # Mémoriser UNIQUEMENT les numéros NON consécutifs
 
-            # REMPLACER complètement les anciennes prédictions par les nouvelles
-            self.predictions = predictions
+            # MODE REMPLACEMENT : Créer backup puis remplacer
+            old_count = 0
+            if replace_mode:
+                old_count = len(self.predictions)
+                if old_count > 0:
+                    self.backup_predictions()
+                    print(f"🔄 REMPLACEMENT: {old_count} anciennes prédictions → {imported_count} nouvelles prédictions")
+                self.predictions = predictions  # REMPLACER complètement
+            else:
+                # MODE FUSION : Ajouter aux prédictions existantes
+                self.predictions.update(predictions)
+                print(f"➕ FUSION: {imported_count} prédictions ajoutées")
+
             self.save_predictions()
-            print(f"🔄 Anciennes prédictions REMPLACÉES par {len(predictions)} nouvelles prédictions")
 
             return {
                 "success": True,
@@ -78,7 +111,8 @@ class ExcelPredictionManager:
                 "skipped": skipped_count,
                 "consecutive_skipped": consecutive_skipped,
                 "total": len(self.predictions),
-                "replaced": True  # Indique que les anciennes ont été remplacées
+                "mode": "remplacement" if replace_mode else "fusion",
+                "old_count": old_count if replace_mode else None
             }
 
         except Exception as e:
@@ -164,37 +198,39 @@ class ExcelPredictionManager:
             self.last_launched_numero = self.predictions[key]["numero"]
             self.save_predictions()
 
-    def _extract_points(self, message_text: str):
-        """Extrait les points du joueur et du banquier depuis le message de résultat"""
+    def extract_points_and_winner(self, message_text: str):
+        """
+        Extrait les points et détermine le gagnant à partir du message
+        Format: #N620. 1(4♠️7♦️J♣️) - ✅4(9♣️5♠️) #T5
+        Le ✅ indique le gagnant réel
+        """
         try:
-            # Format: #N249. ✅8(6♦️2♠️) - 1(5♦️6♦️) ou #N253. 2(2♣️J♥️) - ✅9(3♣️6♦️)
-            # Match nul: #N252. 7(3♠️4♣️) 🔰 7(A♦️6♦️)
-
-            # Pattern pour extraire les points
-            pattern = r'(\d+)\([^)]+\)'
+            # Chercher les groupes de points avec leurs symboles
+            # Format: [symbole optionnel]point(cartes)
+            pattern = r"(✅)?(\d+)\([^)]+\)"
             matches = re.findall(pattern, message_text)
 
             if len(matches) >= 2:
-                # Le premier groupe (avant le tiret) est TOUJOURS le joueur
-                # Le second groupe (après le tiret) est TOUJOURS le banquier
-                joueur_point = int(matches[0])
-                banquier_point = int(matches[1])
+                # Premier groupe = Joueur, Deuxième groupe = Banquier
+                joueur_win_symbol, joueur_point_str = matches[0]
+                banquier_win_symbol, banquier_point_str = matches[1]
 
-                # Validation STRICTE: vérifier que le ✅ correspond bien au gagnant
-                parts = message_text.split('-') if '-' in message_text else message_text.split('🔰')
+                joueur_point = int(joueur_point_str)
+                banquier_point = int(banquier_point_str)
 
-                if '✅' in message_text and not '🔰' in message_text:
-                    # Vérifier la cohérence entre ✅ et les points
-                    if '✅' in parts[0]:
-                        # ✅ avant le tiret → joueur DOIT avoir gagné
-                        if joueur_point <= banquier_point:
-                            print(f"❌ Incohérence CRITIQUE: ✅ sur joueur mais points joueur ({joueur_point}) <= banquier ({banquier_point}) - REJET")
-                            return None, None
-                    elif len(parts) > 1 and '✅' in parts[1]:
-                        # ✅ après le tiret → banquier DOIT avoir gagné
-                        if banquier_point <= joueur_point:
-                            print(f"❌ Incohérence CRITIQUE: ✅ sur banquier mais points banquier ({banquier_point}) <= joueur ({joueur_point}) - REJET")
-                            return None, None
+                # Le gagnant est indiqué par le symbole ✅
+                if joueur_win_symbol:
+                    actual_winner = "joueur"
+                elif banquier_win_symbol:
+                    actual_winner = "banquier"
+                else:
+                    # Fallback: comparer les points si pas de ✅
+                    if joueur_point > banquier_point:
+                        actual_winner = "joueur"
+                    elif banquier_point > joueur_point:
+                        actual_winner = "banquier"
+                    else:
+                        actual_winner = None  # Égalité
 
                 return joueur_point, banquier_point
 
@@ -212,57 +248,59 @@ class ExcelPredictionManager:
             message_text: Texte du message de résultat
             predicted_numero: Numéro prédit
             expected_winner: Gagnant attendu (joueur/banquier)
-            current_offset: Offset réel calculé (0, 1, 2)
+            current_offset: Offset interne de vérification (0, 1, 2)
 
         Returns:
             tuple: (status, should_continue)
-                - status: '✅0️⃣', '✅1️⃣', '✅2️⃣', '❌', ou None
+                - status: '✅0️⃣', '✅1️⃣', '✅2️⃣', '⭕✍🏻', ou None
                 - should_continue: True si on doit continuer à vérifier, False si terminé
         """
         try:
-            # L'offset est maintenant calculé en amont, on vérifie juste qu'il correspond
-            real_offset = game_number - predicted_numero
+            # VALIDATION: Calculer l'offset réel depuis le numéro de jeu
+            real_offset_from_game = game_number - predicted_numero
 
-            # Validation de cohérence
-            if real_offset != current_offset:
-                print(f"⚠️ ERREUR: offset incohérent - real={real_offset}, current={current_offset}")
+            # Si le jeu est avant la prédiction, continuer à attendre (ne pas arrêter)
+            if real_offset_from_game < 0:
+                print(f"⏭️ Jeu #{game_number} est AVANT la prédiction #{predicted_numero} - on continue d'attendre")
                 return None, True
 
-            # Si le jeu est avant la prédiction, continuer à attendre
-            if real_offset < 0:
-                print(f"⏭️ Jeu #{game_number} est AVANT la prédiction #{predicted_numero}")
+            # Si l'offset est trop grand, c'est un échec définitif
+            if real_offset_from_game > 2:
+                print(f"❌ Prédiction Excel #{predicted_numero}: offset {real_offset_from_game} > 2, échec définitif")
+                return '⭕✍🏻', False
+
+            # Vérifier que l'offset passé correspond à l'offset réel
+            if current_offset != real_offset_from_game:
+                print(f"⚠️ Incohérence offset: current_offset={current_offset}, real={real_offset_from_game}")
+                # Utiliser l'offset réel calculé
+                current_offset = real_offset_from_game
+
+            # Vérifier si ce message correspond à l'offset actuel
+            target_number = predicted_numero + current_offset
+
+            if game_number != target_number:
+                # Ce n'est pas encore notre numéro cible, continuer à attendre
                 return None, True
 
-            # Si l'offset est trop grand, échec définitif
-            if real_offset > 2:
-                print(f"❌ Prédiction Excel #{predicted_numero}: offset {real_offset} > 2, échec définitif")
-                return '❌', False
+            # C'est notre numéro cible, vérifier le résultat
+            print(f"🔍 Vérification Excel #{predicted_numero} sur offset interne {current_offset} (numéro {game_number})")
 
-            # **NOUVEAU**: Détecter match nul (🔰) - IGNORER et continuer
-            if '🔰' in message_text:
-                print(f"⚪ Match NUL détecté sur jeu #{game_number} - IGNORÉ, on continue")
-                return None, True
-
-            # ATTENDRE que le message soit finalisé avec ✅
-            if '⏰' in message_text:
-                print(f"⏰ Message en cours d'édition #{game_number}, attente de finalisation avec ✅")
-                return None, True
-
-            # Vérifier si le message contient ✅ (message finalisé)
-            if '✅' not in message_text:
-                print(f"⚠️ Message #{game_number} sans ✅ (non finalisé), on continue à attendre")
+            # Vérifier si le message contient un résultat valide
+            if not any(tag in message_text for tag in ["✅", "🔰"]):
+                print(f"⚠️ Message sans tag de résultat, on continue")
                 return None, True
 
             # Extraire les points
-            joueur_point, banquier_point = self._extract_points(message_text)
+            joueur_point, banquier_point = self.extract_points_and_winner(message_text)
 
             if joueur_point is None or banquier_point is None:
-                # Vérifier si c'est un message avec ✅ mais sans points clairs
-                if '✅' in message_text and '🔰' not in message_text:
-                    print(f"❌ CRITIQUE: Message avec ✅ incohérent - échec immédiat")
-                    return '❌', True
+                # Si c'est une incohérence critique (✅ mal placé), marquer comme échec
+                if '✅' in message_text and not '🔰' in message_text:
+                    print(f"❌ CRITIQUE: Message avec ✅ incohérent - échec de la prédiction #{predicted_numero}")
+                    return '⭕✍🏻', False
                 else:
-                    print(f"⚠️ Impossible d'extraire les points, attente...")
+                    # Sinon, continuer à attendre (peut-être un message incomplet)
+                    print(f"⚠️ Impossible d'extraire les points, on continue")
                     return None, True
 
             # Déterminer le gagnant réel selon les points
@@ -271,35 +309,40 @@ class ExcelPredictionManager:
             elif banquier_point > joueur_point:
                 actual_winner = "banquier"
             else:
-                # Match nul par égalité de points - ignorer aussi
-                print(f"⚪ Match NUL détecté (égalité J:{joueur_point} = B:{banquier_point}) - IGNORÉ")
+                # Match nul - traiter comme échec pour les prédictions
+                print(f"⚠️ Match nul détecté (J:{joueur_point} = B:{banquier_point}), passage à offset suivant")
                 return None, True
 
             # Comparer avec le gagnant attendu
             expected = "banquier" if "banquier" in expected_winner.lower() else "joueur"
 
-            print(f"📊 Points: Joueur={joueur_point}, Banquier={banquier_point} → Gagnant: {actual_winner}, Attendu: {expected}")
+            print(f"📊 Points: Joueur={joueur_point}, Banquier={banquier_point} → Gagnant réel: {actual_winner}, Attendu: {expected}")
 
             if actual_winner != expected:
-                print(f"❌ OFFSET {current_offset}: gagnant INCORRECT ({actual_winner} ≠ {expected})")
-                return None, False
+                print(f"❌ Offset {current_offset}: gagnant incorrect - passage à offset suivant")
+                return None, True
 
-            # ✅ SUCCÈS ! Gagnant correct sur cet offset
-            print(f"✅ OFFSET {current_offset}: gagnant CORRECT ({actual_winner} = {expected}) - ARRÊT")
+            # ✅ SUCCÈS ! L'offset est simplement la différence entre le jeu actuel et le jeu prédit
+            real_offset = game_number - predicted_numero
 
-            if current_offset == 0:
-                return '✅0️⃣', True
-            elif current_offset == 1:
-                return '✅1️⃣', True
-            elif current_offset == 2:
-                return '✅2️⃣', True
+            print(f"✅ Prédiction Excel #{predicted_numero} réussie sur jeu #{game_number}")
+            print(f"   Points: Joueur={joueur_point}, Banquier={banquier_point}")
+            print(f"   Gagnant réel: {actual_winner}, Attendu: {expected}")
+            print(f"   Offset: {real_offset}")
+
+            if real_offset == 0:
+                return '✅0️⃣', False
+            elif real_offset == 1:
+                return '✅1️⃣', False
+            elif real_offset == 2:
+                return '✅2️⃣', False
             else:
-                # Sécurité (ne devrait pas arriver ici)
-                return '❌', True
+                # Si offset > 2, on ne devrait pas arriver ici, mais par sécurité
+                return '✅2️⃣', False
 
         except Exception as e:
             print(f"Erreur verify_excel_prediction: {e}")
-            return None, False
+            return None, True
 
     def get_prediction_format(self, victoire: str) -> str:
         victoire_lower = victoire.lower()

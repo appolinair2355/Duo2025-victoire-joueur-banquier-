@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: bot-telegram-bcarte
+    name: bot-telegram-duo-final
     env: python
     region: frankfurt
     plan: starter
