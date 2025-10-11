@@ -17,3 +17,5 @@ services:
         sync: false
       - key: ADMIN_ID
         sync: false
+      - key: TELEGRAM_SESSION
+        sync: false

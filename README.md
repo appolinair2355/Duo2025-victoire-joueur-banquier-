@@ -1,8 +1,22 @@
-# 📦 Package "duo Final" - Bot Telegram Render.com
+# 📦 Package "Render Final V2" - Bot Telegram Render.com
 
-📅 **Créé le:** 10/10/2025 à 12:19:39 (Heure Bénin UTC+1)
-📦 **Version:** 2025-10-10_12-19-39
-🚀 **Optimisé pour:** Render.com (Port 10000)
+📅 **Créé le:** 11/10/2025 à 00:53:00 (Heure Bénin UTC+1)
+📦 **Version:** 2025-10-11_00-53-00 - V2
+🚀 **Optimisé pour:** Render.com (Port 10000) avec StringSession
+
+---
+
+## 🆕 Nouveautés Version 2
+
+### **Format d'affichage des prédictions:**
+- Format: 🔵{numéro} 👗 𝐕𝟏/𝐕𝟐👗 statut: ⏳
+- 𝐕𝟏 = Joueur
+- 𝐕𝟐 = Banquier
+- Statuts: ⏳ (attente), ✅0️⃣/✅1️⃣/✅2️⃣ (succès), ⭕✍🏻 (échec)
+
+### **Notifications désactivées:**
+- Plus de notification admin lors du lancement des prédictions
+- Messages uniquement dans le canal d'affichage
 
 ---
 
@@ -22,7 +36,7 @@
 - 🚀 Lancement automatique basé sur proximité (tolérance 0-4)
 - 🔢 **Filtrage automatique des numéros consécutifs**
 - ✅ Vérification avec offsets (0, 1, 2)
-- 🎨 Format V1 (Joueur) / V2 (Banquier)
+- 🎨 Format compact: 🔵{numéro} 👗 𝐕𝟏/𝐕𝟐👗
 - 📊 Statistiques en temps réel
 
 ---
@@ -52,18 +66,23 @@
 
 ## 🚀 Déploiement sur Render.com
 
-### **Étape 1: Créer un Repository GitHub**
+### **Étape 1: Obtenir la Session Telegram**
+1. Lancez le bot localement une première fois
+2. Copiez la valeur TELEGRAM_SESSION affichée dans les logs
+3. Gardez cette valeur pour l'étape 3
+
+### **Étape 2: Créer un Repository GitHub**
 1. Allez sur [github.com](https://github.com)
 2. Créez un nouveau repository (public ou privé)
-3. Uploadez **TOUS** les fichiers du package "duo Final.zip"
+3. Uploadez **TOUS** les fichiers du package "render_final.zip"
 
-### **Étape 2: Connecter à Render.com**
+### **Étape 3: Connecter à Render.com**
 1. Allez sur [render.com](https://render.com)
 2. Cliquez sur **"New +"** → **"Web Service"**
 3. Connectez votre repository GitHub
 4. Render détectera automatiquement `render.yaml`
 
-### **Étape 3: Configurer les Variables d'Environnement**
+### **Étape 4: Configurer les Variables d'Environnement**
 Dans la section **Environment** de Render.com, ajoutez:
 
 | Variable | Valeur | Où l'obtenir |
@@ -73,8 +92,11 @@ Dans la section **Environment** de Render.com, ajoutez:
 | **API_HASH** | Votre Hash | https://my.telegram.org |
 | **BOT_TOKEN** | Token du bot | @BotFather sur Telegram |
 | **ADMIN_ID** | Votre ID Telegram | @userinfobot sur Telegram |
+| **TELEGRAM_SESSION** | Session string | Copié depuis l'étape 1 |
 
-### **Étape 4: Déployer**
+⚠️ **IMPORTANT:** Sans TELEGRAM_SESSION, le bot s'arrêtera après 10 minutes!
+
+### **Étape 5: Déployer**
 1. Cliquez sur **"Create Web Service"**
 2. Attendez le déploiement (2-3 minutes)
 3. ✅ Le bot sera en ligne 24/7 sur le port 10000!
@@ -100,7 +122,7 @@ Dans la section **Environment** de Render.com, ajoutez:
 
 ### **Autres Commandes:**
 - `/deploy` - Créer package Render.com (Projet 1)
-- `/deploy_duo2` - Créer package "duo Final" (Projet 1 + 2)
+- `/deploy_duo2` - Créer package "Render Final" (Projet 1 + 2)
 - `/help` - Aide complète
 
 ---
@@ -186,9 +208,9 @@ Votre fichier Excel doit avoir cette structure:
 ## 📞 Support
 
 **Développé par:** Sossou Kouamé Appolinaire  
-**Package créé le:** 2025-10-10_12-19-39  
-**Version:** duo Final  
-**Optimisé pour:** Render.com - Port 10000
+**Package créé le:** 2025-10-11_00-53-00  
+**Version:** Render Final  
+**Optimisé pour:** Render.com - Port 10000 avec StringSession
 
 ---
 

@@ -8,6 +8,7 @@ import zipfile
 import shutil
 from datetime import datetime, timedelta, timezone
 from telethon import TelegramClient, events
+from telethon.sessions import StringSession
 from telethon.events import ChatAction
 from dotenv import load_dotenv
 from game_results_manager import GameResultsManager
@@ -39,7 +40,7 @@ try:
     API_HASH = os.getenv('API_HASH') or ''
     BOT_TOKEN = os.getenv('BOT_TOKEN') or ''
     ADMIN_ID = int(os.getenv('ADMIN_ID') or '0')
-    PORT = int(os.getenv('PORT') or '10000')
+    PORT = int(os.getenv('PORT') or '5000')
 
     # Validation des variables requises
     if not API_ID or API_ID == 0:
@@ -73,21 +74,27 @@ excel_manager = ExcelPredictionManager()
 detected_display_channel = None
 prediction_interval = 1
 
-# Client Telegram
-import time
-session_name = f'bot_session_{int(time.time())}'
-client = TelegramClient(session_name, API_ID, API_HASH)
+# Client Telegram avec StringSession pour persistance sur Render.com
+TELEGRAM_SESSION = os.getenv('TELEGRAM_SESSION', '')
+if TELEGRAM_SESSION:
+    client = TelegramClient(StringSession(TELEGRAM_SESSION), API_ID, API_HASH)
+    logger.info("✅ Utilisation de StringSession depuis les variables d'environnement")
+else:
+    client = TelegramClient(StringSession(), API_ID, API_HASH)
+    logger.info("⚠️ Création d'une nouvelle StringSession (à copier pour Render.com)")
 
 
 def load_config():
     """Charge la configuration depuis le fichier JSON"""
-    global detected_stat_channel
+    global detected_stat_channel, detected_display_channel, prediction_interval
     try:
         if os.path.exists(CONFIG_FILE):
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
                 config = json.load(f)
                 detected_stat_channel = config.get('stat_channel')
-                logger.info(f"✅ Configuration chargée: Canal={detected_stat_channel}")
+                detected_display_channel = config.get('display_channel')
+                prediction_interval = config.get('prediction_interval', 1)
+                logger.info(f"✅ Configuration chargée: Canal source={detected_stat_channel}, Canal affichage={detected_display_channel}")
         else:
             logger.info("ℹ️ Aucune configuration trouvée")
     except Exception as e:
@@ -98,7 +105,9 @@ def save_config():
     """Sauvegarde la configuration dans le fichier JSON"""
     try:
         config = {
-            'stat_channel': detected_stat_channel
+            'stat_channel': detected_stat_channel,
+            'display_channel': detected_display_channel,
+            'prediction_interval': prediction_interval
         }
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
             json.dump(config, f, indent=2)
@@ -106,7 +115,7 @@ def save_config():
         if yaml_manager:
             yaml_manager.set_config('stat_channel', detected_stat_channel)
 
-        logger.info(f"💾 Configuration sauvegardée: Canal={detected_stat_channel}")
+        logger.info(f"💾 Configuration sauvegardée: Canal source={detected_stat_channel}, Canal affichage={detected_display_channel}")
     except Exception as e:
         logger.error(f"❌ Erreur sauvegarde configuration: {e}")
 
@@ -118,9 +127,19 @@ async def start_bot():
         load_config()
         await client.start(bot_token=BOT_TOKEN)
         logger.info("✅ Bot Telegram connecté")
+        
+        # Sauvegarder la session string pour Render.com
+        if not TELEGRAM_SESSION:
+            session_string = client.session.save()
+            if session_string:
+                logger.info(f"📝 IMPORTANT: Ajoutez cette variable d'environnement sur Render.com:")
+                logger.info(f"TELEGRAM_SESSION={session_string}")
+                logger.info(f"📋 Longueur de la session: {len(session_string)} caractères")
+            else:
+                logger.warning("⚠️ Erreur: session string vide, vérifiez la configuration")
 
         me = await client.get_me()
-        username = getattr(me, 'username', 'Unknown') or f"ID:{getattr(me, 'id', 'Unknown')}"
+        username = getattr(me, 'username', 'Unknown') or f"ID:{me.id if hasattr(me, 'id') else 'Unknown'}"
         logger.info(f"✅ Bot opérationnel: @{username}")
 
         if detected_stat_channel:
@@ -144,9 +163,9 @@ async def handler_join(event):
     try:
         if event.user_joined or event.user_added:
             me = await client.get_me()
-            me_id = getattr(me, 'id', None)
+            me_id = me.id if hasattr(me, 'id') else None
 
-            if event.user_id == me_id:
+            if me_id and event.user_id == me_id:
                 channel_id = event.chat_id
 
                 if str(channel_id).startswith('-207') and len(str(channel_id)) == 14:
@@ -233,12 +252,116 @@ Utilisez /fichier pour exporter les résultats.""")
 transferred_messages = {}
 
 
+async def handle_excel_predictions(message_text: str):
+    """Gère le lancement automatique et la vérification des prédictions Excel (Projet 2)"""
+    try:
+        if not detected_display_channel:
+            return
+
+        game_number = predictor.extract_game_number(message_text)
+        if not game_number:
+            return
+
+        logger.info(f"📊 Projet 2: Numéro de jeu détecté #{game_number}")
+
+        for key, pred in list(excel_manager.predictions.items()):
+            if not pred.get("launched"):
+                continue
+
+            if pred.get("completed"):
+                continue
+
+            predicted_numero = pred["numero"]
+            expected_winner = pred["victoire"]
+            current_offset = pred.get("current_offset", 0)
+
+            status, should_continue = excel_manager.verify_excel_prediction(
+                game_number, message_text, predicted_numero, expected_winner, current_offset
+            )
+
+            if status:
+                try:
+                    message_id = pred.get("message_id")
+                    channel_id = pred.get("channel_id")
+                    
+                    if message_id and channel_id:
+                        # Format: 🔵1417 👗 𝐕𝟏👗 statut: ✅2️⃣
+                        if expected_winner.lower() == "joueur":
+                            victoire_text = "𝐕𝟏"
+                        else:
+                            victoire_text = "𝐕𝟐"
+                        
+                        update_msg = f"🔵{predicted_numero} 👗 {victoire_text}👗 statut: {status}"
+                        
+                        await client.edit_message(channel_id, message_id, update_msg)
+                        logger.info(f"✅ Prédiction Excel #{predicted_numero} mise à jour: {status}")
+                        
+                        pred["completed"] = True
+                        pred["final_status"] = status
+                        excel_manager.save_predictions()
+                        logger.info(f"🏁 Prédiction #{predicted_numero} marquée comme terminée avec statut: {status}")
+                except Exception as e:
+                    logger.error(f"❌ Erreur mise à jour prédiction: {e}")
+
+            elif not should_continue:
+                if current_offset < 2:
+                    pred["current_offset"] = current_offset + 1
+                    excel_manager.save_predictions()
+                    logger.info(f"⏭️ Prédiction #{predicted_numero}: passage à l'offset {pred['current_offset']}")
+                else:
+                    pred["completed"] = True
+                    pred["final_status"] = "⭕✍🏻"
+                    excel_manager.save_predictions()
+                    logger.info(f"🏁 Prédiction #{predicted_numero} marquée comme échec définitif après offset 2")
+
+        close_pred = excel_manager.find_close_prediction(game_number, tolerance=4)
+        
+        if close_pred:
+            key = close_pred["key"]
+            prediction = close_pred["prediction"]
+            pred_numero = prediction["numero"]
+            victoire = prediction["victoire"]
+
+            try:
+                # Format: 🔵1417 👗 𝐕𝟏👗 statut: ⏳
+                if victoire.lower() == "joueur":
+                    victoire_text = "𝐕𝟏"
+                else:
+                    victoire_text = "𝐕𝟐"
+                
+                prediction_msg = f"🔵{pred_numero} 👗 {victoire_text}👗 statut: ⏳"
+
+                sent = await client.send_message(detected_display_channel, prediction_msg)
+                
+                excel_manager.mark_as_launched(key, sent.id, detected_display_channel)
+                
+                logger.info(f"🚀 Prédiction Excel lancée: #{pred_numero} → {victoire}")
+                
+                # Notification admin désactivée
+                # try:
+                #     await client.send_message(
+                #         ADMIN_ID,
+                #         f"🚀 **Prédiction Excel lancée**\n\n📍 Numéro: #{pred_numero}\n🎯 Prédiction: {victoire}\n📊 Jeu actuel: #{game_number}"
+                #     )
+                # except:
+                #     pass
+                    
+            except Exception as e:
+                logger.error(f"❌ Erreur publication prédiction: {e}")
+
+    except Exception as e:
+        logger.error(f"❌ Erreur handle_excel_predictions: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
+
 @client.on(events.NewMessage())
 async def handle_message(event):
     """Traite les messages entrants"""
     try:
         me = await client.get_me()
-        if event.sender_id == me.id:
+        me_id = me.id if hasattr(me, 'id') else None
+        if me_id and event.sender_id == me_id:
             return
 
         if not event.is_group and not event.is_channel:
@@ -303,6 +426,8 @@ async def handle_message(event):
             else:
                 logger.info(f"⚠️ Message ignoré: {info}")
 
+            await handle_excel_predictions(message_text)
+
     except Exception as e:
         logger.error(f"❌ Erreur traitement message: {e}")
         import traceback
@@ -352,8 +477,10 @@ async def handle_edited_message(event):
                 except Exception as e:
                     logger.error(f"Erreur notification: {e}")
             else:
-                if "en cours d'édition" not in info:
+                if info and "en cours d'édition" not in info:
                     logger.info(f"⚠️ Message édité ignoré: {info}")
+
+            await handle_excel_predictions(message_text)
 
     except Exception as e:
         logger.error(f"❌ Erreur traitement message édité: {e}")
@@ -500,6 +627,8 @@ async def cmd_deploy(event):
       - key: BOT_TOKEN
         sync: false
       - key: ADMIN_ID
+        sync: false
+      - key: TELEGRAM_SESSION
         sync: false
 """
 
@@ -694,7 +823,7 @@ async def cmd_reset(event):
 
 @client.on(events.NewMessage(pattern='/deploy_duo2'))
 async def cmd_deploy_duo2(event):
-    """Crée un package 'duo Final.zip' avec Projet 1 + Projet 2 optimisé pour Render.com (Port 10000)"""
+    """Crée un package 'duo00.zip' avec Projet 1 + Projet 2 optimisé pour Render.com (Port 10000)"""
     if event.is_group or event.is_channel:
         return
 
@@ -703,13 +832,13 @@ async def cmd_deploy_duo2(event):
         return
 
     try:
-        await event.respond("📦 Création du package 'duo Final' pour Render.com (Port 10000)...")
+        await event.respond("📦 Création du package 'Render Final V2' pour Render.com (Port 10000)...")
 
         benin_tz = timezone(timedelta(hours=1))
         now_benin = datetime.now(benin_tz)
         timestamp = now_benin.strftime('%Y-%m-%d_%H-%M-%S')
         
-        package_name = "duo Final.zip"
+        package_name = "render_final_v2.zip"
         
         with zipfile.ZipFile(package_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
             # ========== FICHIERS PROJET 1 + PROJET 2 ==========
@@ -753,7 +882,8 @@ API_ID=votre_api_id
 API_HASH=votre_api_hash
 BOT_TOKEN=votre_bot_token
 ADMIN_ID=votre_admin_id
-PORT=10000"""
+PORT=10000
+TELEGRAM_SESSION=votre_session_string_ici"""
             zipf.writestr('.env.example', env_example)
             logger.info("  ✅ Ajouté: .env.example")
             
@@ -777,6 +907,8 @@ PORT=10000"""
         sync: false
       - key: ADMIN_ID
         sync: false
+      - key: TELEGRAM_SESSION
+        sync: false
 """
             zipf.writestr('render.yaml', render_yaml)
             logger.info("  ✅ Ajouté: render.yaml")
@@ -796,11 +928,25 @@ PORT=10000"""
             logger.info("  ✅ Ajouté: data/.gitkeep")
             
             # ========== README.MD COMPLET ==========
-            readme = f"""# 📦 Package "duo Final" - Bot Telegram Render.com
+            readme = f"""# 📦 Package "Render Final V2" - Bot Telegram Render.com
 
 📅 **Créé le:** {now_benin.strftime('%d/%m/%Y à %H:%M:%S')} (Heure Bénin UTC+1)
-📦 **Version:** {timestamp}
-🚀 **Optimisé pour:** Render.com (Port 10000)
+📦 **Version:** {timestamp} - V2
+🚀 **Optimisé pour:** Render.com (Port 10000) avec StringSession
+
+---
+
+## 🆕 Nouveautés Version 2
+
+### **Format d'affichage des prédictions:**
+- Format: 🔵{'{numéro}'} 👗 𝐕𝟏/𝐕𝟐👗 statut: ⏳
+- 𝐕𝟏 = Joueur
+- 𝐕𝟐 = Banquier
+- Statuts: ⏳ (attente), ✅0️⃣/✅1️⃣/✅2️⃣ (succès), ⭕✍🏻 (échec)
+
+### **Notifications désactivées:**
+- Plus de notification admin lors du lancement des prédictions
+- Messages uniquement dans le canal d'affichage
 
 ---
 
@@ -820,7 +966,7 @@ PORT=10000"""
 - 🚀 Lancement automatique basé sur proximité (tolérance 0-4)
 - 🔢 **Filtrage automatique des numéros consécutifs**
 - ✅ Vérification avec offsets (0, 1, 2)
-- 🎨 Format V1 (Joueur) / V2 (Banquier)
+- 🎨 Format compact: 🔵{'{numéro}'} 👗 𝐕𝟏/𝐕𝟐👗
 - 📊 Statistiques en temps réel
 
 ---
@@ -850,18 +996,23 @@ PORT=10000"""
 
 ## 🚀 Déploiement sur Render.com
 
-### **Étape 1: Créer un Repository GitHub**
+### **Étape 1: Obtenir la Session Telegram**
+1. Lancez le bot localement une première fois
+2. Copiez la valeur TELEGRAM_SESSION affichée dans les logs
+3. Gardez cette valeur pour l'étape 3
+
+### **Étape 2: Créer un Repository GitHub**
 1. Allez sur [github.com](https://github.com)
 2. Créez un nouveau repository (public ou privé)
-3. Uploadez **TOUS** les fichiers du package "duo Final.zip"
+3. Uploadez **TOUS** les fichiers du package "render_final.zip"
 
-### **Étape 2: Connecter à Render.com**
+### **Étape 3: Connecter à Render.com**
 1. Allez sur [render.com](https://render.com)
 2. Cliquez sur **"New +"** → **"Web Service"**
 3. Connectez votre repository GitHub
 4. Render détectera automatiquement `render.yaml`
 
-### **Étape 3: Configurer les Variables d'Environnement**
+### **Étape 4: Configurer les Variables d'Environnement**
 Dans la section **Environment** de Render.com, ajoutez:
 
 | Variable | Valeur | Où l'obtenir |
@@ -871,8 +1022,11 @@ Dans la section **Environment** de Render.com, ajoutez:
 | **API_HASH** | Votre Hash | https://my.telegram.org |
 | **BOT_TOKEN** | Token du bot | @BotFather sur Telegram |
 | **ADMIN_ID** | Votre ID Telegram | @userinfobot sur Telegram |
+| **TELEGRAM_SESSION** | Session string | Copié depuis l'étape 1 |
 
-### **Étape 4: Déployer**
+⚠️ **IMPORTANT:** Sans TELEGRAM_SESSION, le bot s'arrêtera après 10 minutes!
+
+### **Étape 5: Déployer**
 1. Cliquez sur **"Create Web Service"**
 2. Attendez le déploiement (2-3 minutes)
 3. ✅ Le bot sera en ligne 24/7 sur le port 10000!
@@ -898,7 +1052,7 @@ Dans la section **Environment** de Render.com, ajoutez:
 
 ### **Autres Commandes:**
 - `/deploy` - Créer package Render.com (Projet 1)
-- `/deploy_duo2` - Créer package "duo Final" (Projet 1 + 2)
+- `/deploy_duo2` - Créer package "Render Final" (Projet 1 + 2)
 - `/help` - Aide complète
 
 ---
@@ -985,8 +1139,8 @@ Votre fichier Excel doit avoir cette structure:
 
 **Développé par:** Sossou Kouamé Appolinaire  
 **Package créé le:** {timestamp}  
-**Version:** duo Final  
-**Optimisé pour:** Render.com - Port 10000
+**Version:** Render Final  
+**Optimisé pour:** Render.com - Port 10000 avec StringSession
 
 ---
 
@@ -1011,59 +1165,55 @@ Avant de déployer, vérifiez:
 
         file_size = os.path.getsize(package_name) / 1024
         
-        caption = f"""✅ **Package "duo Final" créé avec succès!**
+        # Caption court pour le fichier
+        short_caption = f"""✅ **Package "Render Final V2" créé!**
 
-📅 {now_benin.strftime('%d/%m/%Y %H:%M:%S')} (Bénin UTC+1)
-📁 duo Final.zip ({file_size:.1f} KB)
-🚀 **Optimisé pour Render.com - Port 10000**
+📅 {now_benin.strftime('%d/%m/%Y %H:%M:%S')} (Bénin)
+📁 render_final_v2.zip ({file_size:.1f} KB)
+🚀 Optimisé Render.com - Port 10000"""
 
-**📦 Contenu Complet:**
-✅ Projet 1: Stockage de résultats
-✅ Projet 2: Système de prédictions Excel
-✅ render.yaml (déploiement automatique)
-✅ Procfile + runtime.txt
-✅ Configuration complète
-✅ README détaillé
+        # Message détaillé séparé
+        detailed_msg = f"""**🆕 Nouveautés V2:**
+✅ Format: 🔵{'{numero}'} 👗 𝐕𝟏/𝐕𝟐👗 statut: ⏳
+✅ Notifications admin désactivées
+✅ Affichage optimisé
+
+**📦 Contenu:**
+• Projet 1: Stockage résultats
+• Projet 2: Prédictions Excel
+• Configuration complète Render.com
 
 **📂 Fichiers inclus:**
-• main.py (projets fusionnés)
-• game_results_manager.py
-• yaml_manager.py
-• predictor.py
-• excel_importer.py
-• render.yaml
-• Procfile
-• runtime.txt
-• requirements.txt
-• bot_config.json
-• .env.example
-• README.md
-• data/.gitkeep
+• main.py, game_results_manager.py
+• yaml_manager.py, predictor.py, excel_importer.py
+• render.yaml, Procfile, runtime.txt
+• requirements.txt, bot_config.json
+• .env.example, README.md
 
-**🚀 Déploiement Render.com:**
-1. Upload sur GitHub
-2. Connecter à Render.com
-3. Configurer variables d'environnement:
-   • API_ID, API_HASH, BOT_TOKEN, ADMIN_ID
-4. Déployer automatiquement!
+**🚀 Déploiement:**
+1. Lancer localement → copier TELEGRAM_SESSION
+2. Upload GitHub
+3. Connecter Render.com
+4. Variables: API_ID, API_HASH, BOT_TOKEN, ADMIN_ID, TELEGRAM_SESSION
+5. Déployer!
 
-**🔄 Workflow Quotidien (00h59 UTC+1):**
-• Export Excel Projet 1
-• Import automatique Projet 2
-• Reset base Projet 1
+**🔄 Quotidien (00h59):**
+• Export Excel → Import auto Projet 2 → Reset
 
-Le bot tournera 24/7 sur le port 10000! 🎉"""
+Le bot tourne 24/7 sur port 10000! 🎉"""
 
         await client.send_file(
             event.chat_id,
             package_name,
-            caption=caption
+            caption=short_caption
         )
         
-        logger.info(f"✅ Package 'duo Final.zip' créé pour Render.com: {file_size:.1f} KB")
+        await client.send_message(event.chat_id, detailed_msg)
+        
+        logger.info(f"✅ Package 'render_final_v2.zip' créé pour Render.com: {file_size:.1f} KB")
         
     except Exception as e:
-        logger.error(f"❌ Erreur création duo Final: {e}")
+        logger.error(f"❌ Erreur création render_final_v2: {e}")
         await event.respond(f"❌ Erreur: {e}")
 
 
@@ -1102,7 +1252,7 @@ Le bot surveille un canal et stocke automatiquement les parties qui remplissent 
 • `/set_display <ID>` - Configurer le canal d'affichage
 • `/stats_excel` - Statistiques des prédictions Excel
 • `/clear_excel` - Effacer toutes les prédictions
-• `/deploy_duo2` - Créer package DUO2 (Projet 1 + 2)
+• `/deploy_duo2` - Créer package Render Final (Projet 1 + 2)
 • Envoyer fichier Excel - Import automatique des prédictions
 
 • `/help` - Afficher cette aide
@@ -1203,6 +1353,7 @@ async def daily_reset():
             logger.info("🔄 REMISE À ZÉRO QUOTIDIENNE À 00H59...")
 
             stats = results_manager.get_stats()
+            excel_file = None
 
             if stats['total'] > 0:
                 date_str = (now_benin - timedelta(days=1)).strftime('%d-%m-%Y')
