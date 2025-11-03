@@ -12,7 +12,7 @@
 - Format: 🔵{numéro} 👗 𝐕𝟏/𝐕𝟐👗 statut: ⏳
 - 𝐕𝟏 = Joueur
 - 𝐕𝟐 = Banquier
-- Statuts: ⏳ (attente), ✅0️⃣/✅1️⃣/✅2️⃣ (succès), ⭕✍🏻 (échec)
+- Statuts: ⏳ (attente), ✅0️⃣/✅1️⃣/✅2️⃣/✅3️⃣ (succès), ⭕✍🏻 (échec)
 
 ### **Notifications désactivées:**
 - Plus de notification admin lors du lancement des prédictions
